@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, ChevronLeft, Layers, User, Loader2 } from 'lucide-react';
+import { Search, ChevronLeft, Layers, User, Loader2, ChevronFirst, ChevronRight, ChevronLast } from 'lucide-react';
 
 // ============================================================================================
 // TYPEN UND SCHNITTSTELLEN
@@ -90,6 +90,30 @@ const encodeDn = (dn: string): string => {
     return encodeURIComponent(dn);
 };
 
+/**
+ * Hilfsfunktion zum Abrufen eines lokalisierten Textes aus einem JSON-String.
+ * Versucht, den Wert in der bevorzugten Sprache zu finden, andernfalls fällt es auf
+ * eine Fallback-Sprache zurück.
+ * @param jsonString Der JSON-String, z.B. '{"de":"Wert", "en":"Value"}'
+ * @param preferredLangs Ein Array von Sprachen (ISO-Codes) in absteigender Priorität.
+ * @param fallback Der Standardwert, wenn keine passende Sprache gefunden wird.
+ * @returns {string} Der gefundene Wert oder der Fallback-Wert.
+ */
+const getLocalizedText = (jsonString: string, preferredLangs: string[], fallback: string = ''): string => {
+    try {
+        const localizedMap = JSON.parse(jsonString);
+        for (const lang of preferredLangs) {
+            if (localizedMap[lang]) {
+                return localizedMap[lang];
+            }
+        }
+    } catch (e) {
+        console.error("Fehler beim Parsen des JSON-Strings für Lokalisierung:", e);
+    }
+    return fallback;
+};
+
+
 // ============================================================================================
 // WIEDERVERWENDBARE KOMPONENTEN
 // ============================================================================================
@@ -129,7 +153,7 @@ const SearchPage = ({ onRoleSelect, onResourceSelect }: { onRoleSelect: (role: R
     const [resourceMetadata, setResourceMetadata] = useState<Metadata | null>(null);
     const [rolePage, setRolePage] = useState(1);
     const [resourcePage, setResourcePage] = useState(1);
-    const itemsPerPage = 10;
+    const [itemsPerPage, setItemsPerPage] = useState(10);
 
     // useEffect für Rollen-Suche (mit Paginierung)
     useEffect(() => {
@@ -156,7 +180,7 @@ const SearchPage = ({ onRoleSelect, onResourceSelect }: { onRoleSelect: (role: R
         };
         const timeoutId = setTimeout(() => fetchRoles(), 500);
         return () => clearTimeout(timeoutId);
-    }, [roleSearch, rolePage]);
+    }, [roleSearch, rolePage, itemsPerPage]);
 
     // useEffect für Ressourcen-Suche (mit Paginierung)
     useEffect(() => {
@@ -183,7 +207,7 @@ const SearchPage = ({ onRoleSelect, onResourceSelect }: { onRoleSelect: (role: R
         };
         const timeoutId = setTimeout(() => fetchResources(), 500);
         return () => clearTimeout(timeoutId);
-    }, [resourceSearch, resourcePage]);
+    }, [resourceSearch, resourcePage, itemsPerPage]);
 
     // Funktion zum Zurücksetzen der Seitenzahl bei einer neuen Suche
     const handleRoleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -195,6 +219,15 @@ const SearchPage = ({ onRoleSelect, onResourceSelect }: { onRoleSelect: (role: R
         setResourceSearch(e.target.value);
         setResourcePage(1);
     };
+
+    const handleItemsPerPageChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+        setItemsPerPage(Number(e.target.value));
+        setRolePage(1);
+        setResourcePage(1);
+    };
+
+    const roleLastPage = roleMetadata ? Math.ceil(roleMetadata.total_count / itemsPerPage) : 1;
+    const resourceLastPage = resourceMetadata ? Math.ceil(resourceMetadata.total_count / itemsPerPage) : 1;
 
     return (
         <div className="p-8 space-y-8 bg-gray-50 dark:bg-gray-900 rounded-xl shadow-lg h-full overflow-y-auto">
@@ -224,7 +257,7 @@ const SearchPage = ({ onRoleSelect, onResourceSelect }: { onRoleSelect: (role: R
                         {error && <li className="text-center text-red-500 p-4">Fehler: {error}</li>}
                         {!isLoading && roles.length > 0 && roles.map((role) => (
                             <li key={role.dn} className="cursor-pointer p-3 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-800 transition-colors" onClick={() => onRoleSelect(role)}>
-                                <p className="font-medium text-gray-800 dark:text-white">{JSON.parse(role.nrflocalizednames).de || 'Kein Name'}</p>
+                                <p className="font-medium text-gray-800 dark:text-white">{getLocalizedText(role.nrflocalizednames, ['en', 'de'], 'Kein Name')}</p>
                                 <p className="text-sm text-gray-500 dark:text-gray-400 truncate">{role.dn}</p>
                             </li>
                         ))}
@@ -233,13 +266,28 @@ const SearchPage = ({ onRoleSelect, onResourceSelect }: { onRoleSelect: (role: R
                 )}
                 {roleSearch.length >= 2 && roleMetadata && (
                     <div className="mt-4 flex justify-between items-center text-sm text-gray-600 dark:text-gray-400">
-                        <span>{`Ergebnisse: ${roleMetadata.from}-${roleMetadata.from + roles.length - 1} von ${roleMetadata.total_count}`}</span>
-                        <div className="space-x-2">
-                            <button onClick={() => setRolePage(p => p - 1)} disabled={rolePage === 1} className="p-2 border border-gray-300 dark:border-gray-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
-                                Vorherige Seite
+                        <span className="flex-grow">{`Ergebnisse: ${roleMetadata.from}-${roleMetadata.from + roles.length - 1} von ${roleMetadata.total_count}`}</span>
+                        <div className="flex items-center space-x-2">
+                            <label htmlFor="role-per-page" className="mr-2">Ergebnisse pro Seite:</label>
+                            <select id="role-per-page" onChange={handleItemsPerPageChange} value={itemsPerPage} className="p-1 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
+                                <option value="10">10</option>
+                                <option value="20">20</option>
+                                <option value="50">50</option>
+                                <option value="100">100</option>
+                                <option value="200">200</option>
+                                <option value="500">500</option>
+                            </select>
+                            <button title="Erste Seite" onClick={() => setRolePage(1)} disabled={rolePage === 1} className="p-2 border border-gray-300 dark:border-gray-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
+                                <ChevronFirst size={16} />
                             </button>
-                            <button onClick={() => setRolePage(p => p + 1)} disabled={!roleMetadata.more} className="p-2 border border-gray-300 dark:border-gray-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
-                                Nächste Seite
+                            <button title="Vorherige Seite" onClick={() => setRolePage(p => p - 1)} disabled={rolePage === 1} className="p-2 border border-gray-300 dark:border-gray-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
+                                <ChevronLeft size={16} />
+                            </button>
+                            <button title="Nächste Seite" onClick={() => setRolePage(p => p + 1)} disabled={!roleMetadata.more} className="p-2 border border-gray-300 dark:border-gray-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
+                                <ChevronRight size={16} />
+                            </button>
+                            <button title="Letzte Seite" onClick={() => setRolePage(roleLastPage)} disabled={rolePage === roleLastPage} className="p-2 border border-gray-300 dark:border-gray-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
+                                <ChevronLast size={16} />
                             </button>
                         </div>
                     </div>
@@ -267,7 +315,7 @@ const SearchPage = ({ onRoleSelect, onResourceSelect }: { onRoleSelect: (role: R
                         {error && <li className="text-center text-red-500 p-4">Fehler: {error}</li>}
                         {!isLoading && resources.length > 0 && resources.map((resource) => (
                             <li key={resource.dn} className="cursor-pointer p-3 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-green-100 dark:hover:bg-green-800 transition-colors" onClick={() => onResourceSelect(resource)}>
-                                <p className="font-medium text-gray-800 dark:text-white">{JSON.parse(resource.nrflocalizednames).de || 'Kein Name'}</p>
+                                <p className="font-medium text-gray-800 dark:text-white">{getLocalizedText(resource.nrflocalizednames, ['en', 'de'], 'Kein Name')}</p>
                                 <p className="text-sm text-gray-500 dark:text-gray-400 truncate">{resource.dn}</p>
                             </li>
                         ))}
@@ -276,13 +324,28 @@ const SearchPage = ({ onRoleSelect, onResourceSelect }: { onRoleSelect: (role: R
                 )}
                 {resourceSearch.length >= 2 && resourceMetadata && (
                     <div className="mt-4 flex justify-between items-center text-sm text-gray-600 dark:text-gray-400">
-                        <span>{`Ergebnisse: ${resourceMetadata.from}-${resourceMetadata.from + resources.length - 1} von ${resourceMetadata.total_count}`}</span>
-                        <div className="space-x-2">
-                            <button onClick={() => setResourcePage(p => p - 1)} disabled={resourcePage === 1} className="p-2 border border-gray-300 dark:border-gray-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
-                                Vorherige Seite
+                        <span className="flex-grow">{`Ergebnisse: ${resourceMetadata.from}-${resourceMetadata.from + resources.length - 1} von ${resourceMetadata.total_count}`}</span>
+                        <div className="flex items-center space-x-2">
+                            <label htmlFor="resource-per-page" className="mr-2">Ergebnisse pro Seite:</label>
+                            <select id="resource-per-page" onChange={handleItemsPerPageChange} value={itemsPerPage} className="p-1 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
+                                <option value="10">10</option>
+                                <option value="20">20</option>
+                                <option value="50">50</option>
+                                <option value="100">100</option>
+                                <option value="200">200</option>
+                                <option value="500">500</option>
+                            </select>
+                            <button title="Erste Seite" onClick={() => setResourcePage(1)} disabled={resourcePage === 1} className="p-2 border border-gray-300 dark:border-gray-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
+                                <ChevronFirst size={16} />
                             </button>
-                            <button onClick={() => setResourcePage(p => p + 1)} disabled={!resourceMetadata.more} className="p-2 border border-gray-300 dark:border-gray-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
-                                Nächste Seite
+                            <button title="Vorherige Seite" onClick={() => setResourcePage(p => p - 1)} disabled={resourcePage === 1} className="p-2 border border-gray-300 dark:border-gray-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
+                                <ChevronLeft size={16} />
+                            </button>
+                            <button title="Nächste Seite" onClick={() => setResourcePage(p => p + 1)} disabled={!resourceMetadata.more} className="p-2 border border-gray-300 dark:border-gray-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
+                                <ChevronRight size={16} />
+                            </button>
+                            <button title="Letzte Seite" onClick={() => setResourcePage(resourceLastPage)} disabled={resourcePage === resourceLastPage} className="p-2 border border-gray-300 dark:border-gray-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">
+                                <ChevronLast size={16} />
                             </button>
                         </div>
                     </div>
@@ -324,7 +387,7 @@ const RoleDetailsPage = ({ role, onBack }: { role: Role; onBack: () => void }) =
 
     return (
         <div className="p-4 bg-white dark:bg-gray-900 rounded-b-xl shadow-lg h-full overflow-y-auto">
-            <PageHeader title={JSON.parse(role.nrflocalizednames).de || 'Kein Name'} onBack={onBack} />
+            <PageHeader title={getLocalizedText(role.nrflocalizednames, ['en', 'de'], 'Kein Name')} onBack={onBack} />
             {isLoading ? (
                 <div className="flex justify-center items-center h-full text-gray-500 dark:text-gray-400">
                     <Loader2 className="animate-spin mr-2" /> Details werden geladen...
@@ -333,13 +396,13 @@ const RoleDetailsPage = ({ role, onBack }: { role: Role; onBack: () => void }) =
                 <div className="p-6 text-red-500">Fehler: {error}</div>
             ) : details ? (
                 <div className="p-6">
-                    <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">{JSON.parse(details.role.nrflocalizednames).de || 'Kein Name'}</h2>
+                    <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">{getLocalizedText(details.role.nrflocalizednames, ['en', 'de'], 'Kein Name')}</h2>
                     <p className="text-sm font-mono text-gray-500 dark:text-gray-400 break-all mb-4">{details.role.dn}</p>
 
                     <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg shadow-inner">
                         <h3 className="font-semibold text-gray-800 dark:text-white mb-2">Details</h3>
                         <p className="text-gray-700 dark:text-gray-300">
-                            <strong className="text-gray-900 dark:text-white">Beschreibung:</strong> {JSON.parse(details.role.nrflocalizeddescrs).de || 'Keine Beschreibung verfügbar.'}
+                            <strong className="text-gray-900 dark:text-white">Beschreibung:</strong> {getLocalizedText(details.role.nrflocalizeddescrs, ['en', 'de'])}
                         </p>
                     </div>
 
@@ -388,7 +451,7 @@ const ResourceDetailsPage = ({ resource, onBack }: { resource: Resource; onBack:
 
     return (
         <div className="p-4 bg-white dark:bg-gray-900 rounded-b-xl shadow-lg h-full overflow-y-auto">
-            <PageHeader title={JSON.parse(resource.nrflocalizednames).de || 'Kein Name'} onBack={onBack} />
+            <PageHeader title={getLocalizedText(resource.nrflocalizednames, ['en', 'de'], 'Kein Name')} onBack={onBack} />
             {isLoading ? (
                 <div className="flex justify-center items-center h-full text-gray-500 dark:text-gray-400">
                     <Loader2 className="animate-spin mr-2" /> Details werden geladen...
@@ -397,7 +460,7 @@ const ResourceDetailsPage = ({ resource, onBack }: { resource: Resource; onBack:
                 <div className="p-6 text-red-500">Fehler: {error}</div>
             ) : details ? (
                 <div className="p-6">
-                    <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">{JSON.parse(resource.nrflocalizednames).de || 'Kein Name'}</h2>
+                    <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">{getLocalizedText(resource.nrflocalizednames, ['en', 'de'], 'Kein Name')}</h2>
                     <p className="text-sm font-mono text-gray-500 dark:text-gray-400 break-all mb-4">{resource.dn}</p>
 
                     <div className="mt-8">
