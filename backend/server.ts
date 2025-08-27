@@ -77,18 +77,68 @@ const checkTables = async () => {
 // API-Endpunkte für die Visualisierung
 // =========================================================================
 
-// Endpunkt für alle Rollen (optional mit Suchfilter)
+// Endpunkt für alle Rollen (optional mit Suchfilter und Paginierung)
 app.get('/api/roles', async (req, res) => {
     try {
-        const { search } = req.query;
+        const { search, fields, from = '1', size = '10' } = req.query;
         let sqlQuery = "SELECT dn, nrflocalizednames, nrflocalizeddescrs FROM viz_roles WHERE is_deleted = FALSE";
+        let countQuery = "SELECT COUNT(*) FROM viz_roles WHERE is_deleted = FALSE";
         const params = [];
+
         if (search) {
-            sqlQuery += " AND (nrflocalizednames ILIKE $1 OR nrflocalizeddescrs ILIKE $1)";
-            params.push(`%${search}%`);
+            const searchTerms = `%${search}%`;
+            const fieldList = typeof fields === 'string' ? fields.split(',').map(f => f.trim()) : null;
+            const whereClauses = [];
+            params.push(searchTerms);
+
+            if (fieldList && fieldList.length > 0) {
+                // Suche in den angegebenen Feldern
+                if (fieldList.includes('dn')) {
+                    whereClauses.push(`dn ILIKE $1`);
+                }
+                if (fieldList.includes('nrflocalizednames')) {
+                    whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizednames::jsonb) AS val WHERE val.value ILIKE $1)`);
+                }
+                if (fieldList.includes('nrflocalizeddescrs')) {
+                    whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizeddescrs::jsonb) AS val WHERE val.value ILIKE $1)`);
+                }
+            } else {
+                // Standard-Suche in allen Feldern, wenn keine angegeben sind
+                whereClauses.push(`dn ILIKE $1`);
+                whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizednames::jsonb) AS val WHERE val.value ILIKE $1)`);
+                whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizeddescrs::jsonb) AS val WHERE val.value ILIKE $1)`);
+            }
+
+            if (whereClauses.length > 0) {
+                sqlQuery += ` AND (${whereClauses.join(' OR ')})`;
+                countQuery += ` AND (${whereClauses.join(' OR ')})`;
+            }
         }
+
+        // Paginierungs-Parameter hinzufügen
+        const fromVal = parseInt(from as string, 10);
+        const sizeVal = parseInt(size as string, 10);
+        // Korrektur: Der Offset wird nun direkt vom 'from'-Wert abgeleitet
+        const offset = fromVal - 1;
+
+        sqlQuery += ` LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+        params.push(sizeVal, offset);
+
         const result = await query(sqlQuery, params);
-        res.json(result.rows);
+        const countResult = await query(countQuery, params.slice(0, params.length - 2));
+        const totalCount = parseInt(countResult.rows[0].count, 10);
+
+        const metadata = {
+            total_count: totalCount,
+            from: fromVal, // Korrigiert: Gibt die korrekte Startnummer des Datensatzes zurück
+            size: result.rows.length,
+            more: (fromVal + result.rows.length - 1) < totalCount
+        };
+
+        res.json({
+            data: result.rows,
+            metadata: metadata
+        });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
     }
@@ -128,27 +178,92 @@ app.get('/api/roles/:dn', async (req, res) => {
         const resourcesResult = await query(resourcesQuery, [allDns]);
 
         res.json({
-            role: hierarchyResult.rows.find(row => row.dn === dn),
-            hierarchy: hierarchyResult.rows,
-            resources: resourcesResult.rows,
+            data: {
+                role: hierarchyResult.rows.find(row => row.dn === dn),
+                hierarchy: hierarchyResult.rows,
+                resources: resourcesResult.rows,
+            },
+            metadata: {}
         });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// Endpunkt für alle Ressourcen (optional mit Suchfilter)
+// Endpunkt für alle Ressourcen (optional mit Suchfilter und Paginierung)
 app.get('/api/resources', async (req, res) => {
     try {
-        const { search } = req.query;
+        const { search, fields, from = '1', size = '10' } = req.query;
         let sqlQuery = "SELECT dn, nrflocalizednames, nrflocalizeddescrs FROM viz_resources WHERE is_deleted = FALSE";
+        let countQuery = "SELECT COUNT(*) FROM viz_resources WHERE is_deleted = FALSE";
         const params = [];
+
         if (search) {
-            sqlQuery += " AND (nrflocalizednames ILIKE $1 OR nrflocalizeddescrs ILIKE $1)";
-            params.push(`%${search}%`);
+            const searchTerms = `%${search}%`;
+            const fieldList = typeof fields === 'string' ? fields.split(',').map(f => f.trim()) : null;
+            const whereClauses = [];
+            params.push(searchTerms);
+
+            if (fieldList && fieldList.length > 0) {
+                // Suche in den angegebenen Feldern
+                if (fieldList.includes('dn')) {
+                    whereClauses.push(`dn ILIKE $1`);
+                }
+                if (fieldList.includes('nrflocalizednames')) {
+                    whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizednames::jsonb) AS val WHERE val.value ILIKE $1)`);
+                }
+                if (fieldList.includes('nrflocalizeddescrs')) {
+                    whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizeddescrs::jsonb) AS val WHERE val.value ILIKE $1)`);
+                }
+                if (fieldList.includes('entitlement_xml_param_id')) {
+                    whereClauses.push(`entitlement_xml_param_id ILIKE $1`);
+                }
+                if (fieldList.includes('entitlement_xml_param_id2')) {
+                    whereClauses.push(`entitlement_xml_param_id2 ILIKE $1`);
+                }
+                if (fieldList.includes('entitlement_xml_param_id3')) {
+                    whereClauses.push(`entitlement_xml_param_id3 ILIKE $1`);
+                }
+            } else {
+                // Standard-Suche in allen Feldern, wenn keine angegeben sind
+                whereClauses.push(`dn ILIKE $1`);
+                whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizednames::jsonb) AS val WHERE val.value ILIKE $1)`);
+                whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizeddescrs::jsonb) AS val WHERE val.value ILIKE $1)`);
+                whereClauses.push(`entitlement_xml_param_id ILIKE $1`);
+                whereClauses.push(`entitlement_xml_param_id2 ILIKE $1`);
+                whereClauses.push(`entitlement_xml_param_id3 ILIKE $1`);
+            }
+
+            if (whereClauses.length > 0) {
+                sqlQuery += ` AND (${whereClauses.join(' OR ')})`;
+                countQuery += ` AND (${whereClauses.join(' OR ')})`;
+            }
         }
+
+        // Paginierungs-Parameter hinzufügen
+        const fromVal = parseInt(from as string, 10);
+        const sizeVal = parseInt(size as string, 10);
+        // Korrektur: Der Offset wird nun direkt vom 'from'-Wert abgeleitet
+        const offset = fromVal - 1;
+
+        sqlQuery += ` LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+        params.push(sizeVal, offset);
+
         const result = await query(sqlQuery, params);
-        res.json(result.rows);
+        const countResult = await query(countQuery, params.slice(0, params.length - 2));
+        const totalCount = parseInt(countResult.rows[0].count, 10);
+
+        const metadata = {
+            total_count: totalCount,
+            from: fromVal, // Korrigiert: Gibt die korrekte Startnummer des Datensatzes zurück
+            size: result.rows.length,
+            more: (fromVal + result.rows.length - 1) < totalCount
+        };
+
+        res.json({
+            data: result.rows,
+            metadata: metadata
+        });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
     }
@@ -193,8 +308,11 @@ app.get('/api/resources/:dn/roles', async (req, res) => {
         }));
 
         res.json({
-            resource_dn: dn,
-            roles: rolesWithHierarchy,
+            data: {
+                resource_dn: dn,
+                roles: rolesWithHierarchy,
+            },
+            metadata: {}
         });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
