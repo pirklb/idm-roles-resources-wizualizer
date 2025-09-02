@@ -1,326 +1,344 @@
-/**
- * Hauptserver-Datei für das Node.js Backend.
- *
- * Dieses Programm implementiert alle Backend-Funktionalitäten:
- * - REST-API-Endpunkte mit Paginierung, die die PostgreSQL-Datenbank verwenden.
- * - Spezifische Endpunkte zum Abrufen von Rollen- und Ressourcen-Hierarchien.
- *
- * WICHTIG: Die gesamte LDAP-Logik und die Synchronisation wurden in ein separates
- * Go-Programm ausgelagert. Dieses Backend agiert als reiner API-Server.
- *
- * Um dieses Backend auszuführen:
- * 1. Stellen Sie sicher, dass Node.js und npm installiert sind.
- * 2. Führen Sie `npm install` aus, um die Abhängigkeiten zu installieren.
- * 3. Erstellen Sie eine `.env`-Datei mit den PostgreSQL-Anmeldeinformationen.
- * 4. Stellen Sie sicher, dass das Go-Programm einmalig ausgeführt wurde, um die Datenbank zu befüllen.
- * 5. Führen Sie `npm start` aus, um den Server zu starten.
- */
+// Version: 1.0.13
 import express from 'express';
 import { Pool, QueryResult } from 'pg';
-import dotenv from 'dotenv';
 import cors from 'cors';
+import * as dotenv from 'dotenv';
 
-// Umgebungsvariablen laden
 dotenv.config();
 
 const app = express();
 const port = 3000;
 
+app.use(cors());
 app.use(express.json());
-app.use(cors()); // CORS für Frontend-Anfragen aktivieren
 
-// PostgreSQL-Datenbank-Pool initialisieren
-if (!process.env.DBUSER || !process.env.DB_PASSWORD || !process.env.DB_HOST) {
-    console.error('Bitte legen Sie die Umgebungsvariablen DBUSER, DB_PASSWORD und DB_HOST fest.');
-    throw new Error('Fehlende Umgebungsvariablen für die Datenbankverbindung.');
-}
-
-const clientPool = new Pool({
+// Datenbankkonfiguration aus Umgebungsvariablen
+const pool = new Pool({
     user: process.env.DBUSER,
     password: process.env.DB_PASSWORD,
     host: process.env.DB_HOST,
-    port: parseInt(process.env.DB_PORT ?? '5432', 10),
-    database: process.env.DB_DATABASE ?? 'idm_rolemanagement_prod',
+    port: parseInt(process.env.DB_PORT || '5432', 10),
+    database: process.env.DB_DATABASE || 'idm_rolemanagement_prod',
 });
 
-// Wrapper-Funktion für Datenbankabfragen
-const query = async (text: string, params?: any[]): Promise<QueryResult> => {
-    const start = Date.now();
-    const res = await clientPool.query(text, params);
-    const duration = Date.now() - start;
-    console.log({ funk: 'db.query', parameters: { params }, info: { text, duration, rows: res.rowCount } });
-    return res;
+// `db.query` Funktion zur Kapselung von Datenbankaufrufen
+const db = {
+    query: async (text: string, params: any[] = []): Promise<QueryResult<any>> => {
+        const start = Date.now();
+        const res = await pool.query(text, params);
+        const duration = Date.now() - start;
+        console.log({ funk: 'db.query', parameters: { params }, info: { text, duration, rows: res.rowCount } });
+        return res;
+    },
 };
 
-// Überprüfen der Datenbanktabellen (sollte vom Go-Programm erstellt worden sein)
+// Überprüft, ob alle benötigten Tabellen existieren und ob die Verbindung funktioniert.
 const checkTables = async () => {
+    console.log('Überprüfe die Datenbanktabellen...');
+    const tableCounts = {
+        roles: 0,
+        resources: 0,
+        associations: 0,
+        parents: 0,
+    };
+
     try {
-        const rolesResult = await query("SELECT COUNT(*) FROM viz_roles");
-        console.log(`Tabelle viz_roles hat ${rolesResult.rows[0].count} Datensätze.`);
-
-        const resourcesResult = await query("SELECT COUNT(*) FROM viz_resources");
-        console.log(`Tabelle viz_resources hat ${resourcesResult.rows[0].count} Datensätze.`);
-
-        const rolesResourcesResult = await query("SELECT COUNT(*) FROM viz_roles_resources");
-        console.log(`Tabelle viz_roles_resources hat ${rolesResourcesResult.rows[0].count} Datensätze.`);
-
-        const rolesParentsResult = await query("SELECT COUNT(*) FROM viz_roles_parents");
-        console.log(`Tabelle viz_roles_parents hat ${rolesParentsResult.rows[0].count} Datensätze.`);
-
-        console.log('Datenbanktabellen sind vorhanden und bereit.');
+        const roleCount = await db.query('SELECT COUNT(*) FROM viz_roles');
+        tableCounts.roles = parseInt(roleCount.rows[0].count, 10);
+        const resourceCount = await db.query('SELECT COUNT(*) FROM viz_resources');
+        tableCounts.resources = parseInt(resourceCount.rows[0].count, 10);
+        const associationCount = await db.query('SELECT COUNT(*) FROM viz_roles_resources');
+        tableCounts.associations = parseInt(associationCount.rows[0].count, 10);
+        const parentCount = await db.query('SELECT COUNT(*) FROM viz_roles_parents');
+        tableCounts.parents = parseInt(parentCount.rows[0].count, 10);
+        console.log(`Datenbanktabellen sind vorhanden und bereit.`);
+        console.log(`Anzahl der Rollen: ${tableCounts.roles}`);
+        console.log(`Anzahl der Ressourcen: ${tableCounts.resources}`);
+        console.log(`Anzahl der Assoziationen: ${tableCounts.associations}`);
+        console.log(`Anzahl der Parent-Beziehungen: ${tableCounts.parents}`);
     } catch (error) {
-        console.error('Fehler beim Überprüfen der Datenbanktabellen. Bitte stellen Sie sicher, dass das Go-Synchronisationsprogramm ausgeführt wurde:', error);
+        console.error('Fehler beim Überprüfen der Tabellen:', error);
+        process.exit(1);
     }
 };
 
-// =========================================================================
-// API-Endpunkte für die Visualisierung
-// =========================================================================
+// Datenbankfunktion zur Bestimmung des lokalisierten Namens
+const createLocalizedFunction = async () => {
+    try {
+        await db.query(`
+      CREATE OR REPLACE FUNCTION get_localized_text(localized_json JSONB, default_value TEXT)
+      RETURNS TEXT AS $$
+      BEGIN
+          IF localized_json ? 'en' THEN
+              RETURN localized_json ->> 'en';
+          ELSIF localized_json ? 'de' THEN
+              RETURN localized_json ->> 'de';
+          ELSIF jsonb_array_length(localized_json) > 0 THEN
+              RETURN (SELECT value FROM jsonb_each_text(localized_json) LIMIT 1);
+          ELSE
+              RETURN default_value;
+          END IF;
+      END;
+      $$ LANGUAGE plpgsql IMMUTABLE;
+    `);
+        console.log('Datenbankfunktion get_localized_text wurde erstellt/aktualisiert.');
+    } catch (error) {
+        console.error('Fehler beim Erstellen der Datenbankfunktion:', error);
+    }
+};
 
-// Endpunkt für alle Rollen (optional mit Suchfilter und Paginierung)
+
+// Startet den Server
+app.listen(port, async () => {
+    console.log(`Server läuft auf http://localhost:${port}`);
+    await checkTables();
+    await createLocalizedFunction();
+});
+
+// Endpunkt für Rollen-Suche mit Paginierung und erweiterter Suche
 app.get('/api/roles', async (req, res) => {
-    try {
-        const { search, fields, from = '1', size = '10' } = req.query;
-        let sqlQuery = "SELECT dn, nrflocalizednames, nrflocalizeddescrs FROM viz_roles WHERE is_deleted = FALSE";
-        let countQuery = "SELECT COUNT(*) FROM viz_roles WHERE is_deleted = FALSE";
-        const params = [];
+    const { search, fields, from = 1, size = 10 } = req.query;
+    const offset = Math.max(0, (parseInt(from as string, 10) || 1) - 1);
+    const limit = parseInt(size as string, 10) || 10;
 
-        if (search) {
-            const searchTerms = `%${search}%`;
-            const fieldList = typeof fields === 'string' ? fields.split(',').map(f => f.trim()) : null;
-            const whereClauses = [];
-            params.push(searchTerms);
+    let totalCountQuery = 'SELECT COUNT(*) FROM viz_roles';
+    let dataQuery = `
+    SELECT *, get_localized_text(nrflocalizednames, 'missing-name') as "sortname", get_localized_text(nrflocalizeddescrs, '') as "sortdesc" 
+    FROM viz_roles 
+  `;
+    const queryParams: any[] = [];
 
-            if (fieldList && fieldList.length > 0) {
-                // Suche in den angegebenen Feldern
-                if (fieldList.includes('dn')) {
-                    whereClauses.push(`dn ILIKE $1`);
-                }
-                if (fieldList.includes('nrflocalizednames')) {
-                    whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizednames::jsonb) AS val WHERE val.value ILIKE $1)`);
-                }
-                if (fieldList.includes('nrflocalizeddescrs')) {
-                    whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizeddescrs::jsonb) AS val WHERE val.value ILIKE $1)`);
-                }
+    if (search) {
+        let searchCondition = '';
+        const searchFields = fields ? (fields as string).split(',') : ['dn', 'nrflocalizednames', 'nrflocalizeddescrs'];
+
+        // Escaping the search term to treat _ and % as literal characters
+        const escapedSearch = (search as string).replace(/%/g, '\\%').replace(/_/g, '\\_');
+        const searchTerm = `%${escapedSearch}%`;
+
+        searchFields.forEach((field, index) => {
+            if (index > 0) {
+                searchCondition += ' OR ';
+            }
+            if (['nrflocalizednames', 'nrflocalizeddescrs'].includes(field)) {
+                searchCondition += `get_localized_text(${field}, '') ILIKE $${queryParams.length + 1} ESCAPE '\\'`;
             } else {
-                // Standard-Suche in allen Feldern, wenn keine angegeben sind
-                whereClauses.push(`dn ILIKE $1`);
-                whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizednames::jsonb) AS val WHERE val.value ILIKE $1)`);
-                whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizeddescrs::jsonb) AS val WHERE val.value ILIKE $1)`);
+                searchCondition += `${field} ILIKE $${queryParams.length + 1} ESCAPE '\\'`;
             }
-
-            if (whereClauses.length > 0) {
-                sqlQuery += ` AND (${whereClauses.join(' OR ')})`;
-                countQuery += ` AND (${whereClauses.join(' OR ')})`;
-            }
-        }
-
-        // Paginierungs-Parameter hinzufügen
-        const fromVal = parseInt(from as string, 10);
-        const sizeVal = parseInt(size as string, 10);
-        // Korrektur: Der Offset wird nun direkt vom 'from'-Wert abgeleitet
-        const offset = fromVal - 1;
-
-        sqlQuery += ` LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-        params.push(sizeVal, offset);
-
-        const result = await query(sqlQuery, params);
-        const countResult = await query(countQuery, params.slice(0, params.length - 2));
-        const totalCount = parseInt(countResult.rows[0].count, 10);
-
-        const metadata = {
-            total_count: totalCount,
-            from: fromVal, // Korrigiert: Gibt die korrekte Startnummer des Datensatzes zurück
-            size: result.rows.length,
-            more: (fromVal + result.rows.length - 1) < totalCount
-        };
-
-        res.json({
-            data: result.rows,
-            metadata: metadata
+            queryParams.push(searchTerm);
         });
-    } catch (err: any) {
-        res.status(500).json({ error: err.message });
+
+        totalCountQuery += ` WHERE ${searchCondition}`;
+        dataQuery += ` WHERE ${searchCondition}`;
     }
-});
 
-// Endpunkt für eine spezifische Rolle, inklusive ihrer Hierarchie
-app.get('/api/roles/:dn', async (req, res) => {
     try {
-        const { dn } = req.params;
+        const totalCountResult = await db.query(totalCountQuery, queryParams);
+        const totalCount = parseInt(totalCountResult.rows[0].count, 10);
 
-        // Recursive query to get all child roles (direct and indirect)
-        const hierarchyQuery = `
-      WITH RECURSIVE role_hierarchy AS (
-        -- Base case: the selected role itself
-        SELECT dn, nrflocalizednames, nrflocalizeddescrs
-        FROM viz_roles
-        WHERE dn = $1 AND is_deleted = FALSE
-        UNION ALL
-        -- Recursive step: find children of the roles in the hierarchy
-        SELECT r.dn, r.nrflocalizednames, r.nrflocalizeddescrs
-        FROM viz_roles r
-        JOIN viz_roles_parents rp ON r.dn = rp.child_dn
-        JOIN role_hierarchy rh ON rp.parent_dn = rh.dn
-      )
-      SELECT DISTINCT dn, nrflocalizednames, nrflocalizeddescrs FROM role_hierarchy;
-    `;
-        const hierarchyResult = await query(hierarchyQuery, [dn]);
+        dataQuery += ` ORDER BY sortname ASC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+        queryParams.push(limit, offset);
 
-        // Get all resources for the selected role and its children
-        const resourcesQuery = `
-      SELECT r.dn, r.nrflocalizednames, r.nrflocalizeddescrs, rra.nrfRole AS role_dn
-      FROM viz_resources r
-      JOIN viz_roles_resources rra ON r.dn = rra.nrfResource
-      WHERE rra.nrfRole = ANY($1::TEXT[]) AND r.is_deleted = FALSE;
-    `;
-        const allDns = hierarchyResult.rows.map(row => row.dn);
-        const resourcesResult = await query(resourcesQuery, [allDns]);
+        const rolesResult = await db.query(dataQuery, queryParams);
+
+        const hasMore = totalCount > (offset + limit);
 
         res.json({
-            data: {
-                role: hierarchyResult.rows.find(row => row.dn === dn),
-                hierarchy: hierarchyResult.rows,
-                resources: resourcesResult.rows,
+            data: rolesResult.rows,
+            metadata: {
+                total_count: totalCount,
+                from: offset + 1,
+                size: rolesResult.rows.length,
+                more: hasMore,
             },
-            metadata: {}
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        console.error('Fehler beim Abrufen der Rollen:', err.message);
+        res.status(500).json({ error: 'Fehler beim Abrufen der Rollen', details: err.message });
     }
 });
 
-// Endpunkt für alle Ressourcen (optional mit Suchfilter und Paginierung)
+// Endpunkt für Ressourcen-Suche mit Paginierung und erweiterter Suche
 app.get('/api/resources', async (req, res) => {
-    try {
-        const { search, fields, from = '1', size = '10' } = req.query;
-        let sqlQuery = "SELECT dn, nrflocalizednames, nrflocalizeddescrs FROM viz_resources WHERE is_deleted = FALSE";
-        let countQuery = "SELECT COUNT(*) FROM viz_resources WHERE is_deleted = FALSE";
-        const params = [];
+    const { search, fields, from = 1, size = 10 } = req.query;
+    const offset = Math.max(0, (parseInt(from as string, 10) || 1) - 1);
+    const limit = parseInt(size as string, 10) || 10;
 
-        if (search) {
-            const searchTerms = `%${search}%`;
-            const fieldList = typeof fields === 'string' ? fields.split(',').map(f => f.trim()) : null;
-            const whereClauses = [];
-            params.push(searchTerms);
+    let totalCountQuery = 'SELECT COUNT(*) FROM viz_resources';
+    let dataQuery = `
+    SELECT *, get_localized_text(nrflocalizednames, 'missing-name') as "sortname", get_localized_text(nrflocalizeddescrs, '') as "sortdesc" 
+    FROM viz_resources
+  `;
+    const queryParams: any[] = [];
 
-            if (fieldList && fieldList.length > 0) {
-                // Suche in den angegebenen Feldern
-                if (fieldList.includes('dn')) {
-                    whereClauses.push(`dn ILIKE $1`);
-                }
-                if (fieldList.includes('nrflocalizednames')) {
-                    whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizednames::jsonb) AS val WHERE val.value ILIKE $1)`);
-                }
-                if (fieldList.includes('nrflocalizeddescrs')) {
-                    whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizeddescrs::jsonb) AS val WHERE val.value ILIKE $1)`);
-                }
-                if (fieldList.includes('entitlement_xml_param_id')) {
-                    whereClauses.push(`entitlement_xml_param_id ILIKE $1`);
-                }
-                if (fieldList.includes('entitlement_xml_param_id2')) {
-                    whereClauses.push(`entitlement_xml_param_id2 ILIKE $1`);
-                }
-                if (fieldList.includes('entitlement_xml_param_id3')) {
-                    whereClauses.push(`entitlement_xml_param_id3 ILIKE $1`);
-                }
+    if (search) {
+        let searchCondition = '';
+        const searchFields = fields ? (fields as string).split(',') : ['dn', 'nrflocalizednames', 'nrflocalizeddescrs', 'entitlement_xml_param_id', 'entitlement_xml_param_id2', 'entitlement_xml_param_id3'];
+
+        // Escaping the search term to treat _ and % as literal characters
+        const escapedSearch = (search as string).replace(/%/g, '\\%').replace(/_/g, '\\_');
+        const searchTerm = `%${escapedSearch}%`;
+
+        searchFields.forEach((field, index) => {
+            if (index > 0) {
+                searchCondition += ' OR ';
+            }
+            if (['nrflocalizednames', 'nrflocalizeddescrs'].includes(field)) {
+                searchCondition += `get_localized_text(${field}, '') ILIKE $${queryParams.length + 1} ESCAPE '\\'`;
             } else {
-                // Standard-Suche in allen Feldern, wenn keine angegeben sind
-                whereClauses.push(`dn ILIKE $1`);
-                whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizednames::jsonb) AS val WHERE val.value ILIKE $1)`);
-                whereClauses.push(`EXISTS (SELECT 1 FROM jsonb_each_text(nrflocalizeddescrs::jsonb) AS val WHERE val.value ILIKE $1)`);
-                whereClauses.push(`entitlement_xml_param_id ILIKE $1`);
-                whereClauses.push(`entitlement_xml_param_id2 ILIKE $1`);
-                whereClauses.push(`entitlement_xml_param_id3 ILIKE $1`);
+                searchCondition += `${field} ILIKE $${queryParams.length + 1} ESCAPE '\\'`;
             }
+            queryParams.push(searchTerm);
+        });
 
-            if (whereClauses.length > 0) {
-                sqlQuery += ` AND (${whereClauses.join(' OR ')})`;
-                countQuery += ` AND (${whereClauses.join(' OR ')})`;
-            }
-        }
+        totalCountQuery += ` WHERE ${searchCondition}`;
+        dataQuery += ` WHERE ${searchCondition}`;
+    }
 
-        // Paginierungs-Parameter hinzufügen
-        const fromVal = parseInt(from as string, 10);
-        const sizeVal = parseInt(size as string, 10);
-        // Korrektur: Der Offset wird nun direkt vom 'from'-Wert abgeleitet
-        const offset = fromVal - 1;
+    try {
+        const totalCountResult = await db.query(totalCountQuery, queryParams);
+        const totalCount = parseInt(totalCountResult.rows[0].count, 10);
 
-        sqlQuery += ` LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-        params.push(sizeVal, offset);
+        dataQuery += ` ORDER BY sortname ASC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+        queryParams.push(limit, offset);
 
-        const result = await query(sqlQuery, params);
-        const countResult = await query(countQuery, params.slice(0, params.length - 2));
-        const totalCount = parseInt(countResult.rows[0].count, 10);
+        const resourcesResult = await db.query(dataQuery, queryParams);
 
-        const metadata = {
-            total_count: totalCount,
-            from: fromVal, // Korrigiert: Gibt die korrekte Startnummer des Datensatzes zurück
-            size: result.rows.length,
-            more: (fromVal + result.rows.length - 1) < totalCount
-        };
+        const hasMore = totalCount > (offset + limit);
 
         res.json({
-            data: result.rows,
-            metadata: metadata
+            data: resourcesResult.rows,
+            metadata: {
+                total_count: totalCount,
+                from: offset + 1,
+                size: resourcesResult.rows.length,
+                more: hasMore,
+            },
         });
     } catch (err: any) {
-        res.status(500).json({ error: err.message });
+        console.error('Fehler beim Abrufen der Ressourcen:', err.message);
+        res.status(500).json({ error: 'Fehler beim Abrufen der Ressourcen', details: err.message });
     }
 });
 
-// Endpunkt für eine spezifische Ressource, die alle zugehörigen Rollen auflistet
-app.get('/api/resources/:dn/roles', async (req, res) => {
+// Endpunkt zum Abrufen einer spezifischen Rolle
+app.get('/api/roles/:dn', async (req, res) => {
+    const { dn } = req.params;
     try {
-        const { dn } = req.params;
+        const result = await db.query('SELECT *, get_localized_text(nrflocalizednames, \'missing-name\') as "sortname", get_localized_text(nrflocalizeddescrs, \'\') as "sortdesc" FROM viz_roles WHERE dn = $1', [dn]);
+        if (result.rows.length > 0) {
+            res.json(result.rows[0]);
+        } else {
+            res.status(404).send('Rolle nicht gefunden.');
+        }
+    } catch (err) {
+        res.status(500).send('Fehler beim Abrufen der Rolle.');
+    }
+});
 
-        // Find all roles directly associated with this resource
-        const rolesQuery = `
-      SELECT r.dn, r.nrflocalizednames, r.nrflocalizeddescrs
-      FROM viz_roles r
-      JOIN viz_roles_resources rra ON r.dn = rra.nrfRole
-      WHERE rra.nrfResource = $1 AND r.is_deleted = FALSE;
+// Endpunkt zum Abrufen einer spezifischen Ressource
+app.get('/api/resources/:dn', async (req, res) => {
+    const { dn } = req.params;
+    try {
+        const result = await db.query('SELECT *, get_localized_text(nrflocalizednames, \'missing-name\') as "sortname", get_localized_text(nrflocalizeddescrs, \'\') as "sortdesc" FROM viz_resources WHERE dn = $1', [dn]);
+        if (result.rows.length > 0) {
+            res.json(result.rows[0]);
+        } else {
+            res.status(404).send('Ressource nicht gefunden.');
+        }
+    } catch (err) {
+        res.status(500).send('Fehler beim Abrufen der Ressource.');
+    }
+});
+
+// Rekursiver Endpunkt zur Abfrage der gesamten Rollen-Hierarchie
+app.get('/api/roles/:dn/full-hierarchy', async (req, res) => {
+    const { dn } = req.params;
+
+    try {
+        const parentQuery = `
+      WITH RECURSIVE parents_recursive AS (
+        SELECT rp.parent_dn AS dn, 1 AS depth
+        FROM viz_roles_parents AS rp
+        WHERE rp.child_dn = $1
+        UNION
+        SELECT r.parent_dn AS dn, pr.depth + 1
+        FROM viz_roles_parents AS r
+        JOIN parents_recursive AS pr ON r.child_dn = pr.dn
+      )
+      SELECT r.*,
+      get_localized_text(r.nrflocalizednames, 'missing-name') as "sortname",
+      get_localized_text(r.nrflocalizeddescrs, '') as "sortdesc",
+      pr.depth
+      FROM viz_roles AS r
+      JOIN parents_recursive AS pr ON r.dn = pr.dn;
     `;
-        const rolesResult = await query(rolesQuery, [dn]);
+        const parentsResult = await db.query(parentQuery, [dn]);
 
-        // For each role, find its parent hierarchy
-        const rolesWithHierarchy = await Promise.all(rolesResult.rows.map(async (role) => {
-            const parentHierarchyQuery = `
-        WITH RECURSIVE parent_hierarchy AS (
-          -- Base case: the current role
-          SELECT dn, nrflocalizednames, nrflocalizeddescrs
-          FROM viz_roles
-          WHERE dn = $1
-          UNION ALL
-          -- Recursive step: find parents of the roles in the hierarchy
-          SELECT r.dn, r.nrflocalizednames, r.nrflocalizeddescrs
-          FROM viz_roles r
-          JOIN viz_roles_parents rp ON r.dn = rp.parent_dn
-          JOIN parent_hierarchy ph ON rp.child_dn = ph.dn
-        )
-        SELECT * FROM parent_hierarchy;
+        const childrenQuery = `
+      WITH RECURSIVE children_recursive AS (
+        SELECT rp.child_dn AS dn, 1 AS depth
+        FROM viz_roles_parents AS rp
+        WHERE rp.parent_dn = $1
+        UNION
+        SELECT r.child_dn AS dn, cr.depth + 1
+        FROM viz_roles_parents AS r
+        JOIN children_recursive AS cr ON r.parent_dn = cr.dn
+      )
+      SELECT r.*,
+      get_localized_text(r.nrflocalizednames, 'missing-name') as "sortname",
+      get_localized_text(r.nrflocalizeddescrs, '') as "sortdesc",
+      cr.depth
+      FROM viz_roles AS r
+      JOIN children_recursive AS cr ON r.dn = cr.dn;
+    `;
+        const childrenResult = await db.query(childrenQuery, [dn]);
+
+        // Für jedes Child die direkt zugeordneten Ressourcen abrufen
+        const childrenWithResources = await Promise.all(childrenResult.rows.map(async (child: any) => {
+            const resourcesQuery = `
+        SELECT res.*,
+        get_localized_text(res.nrflocalizednames, 'missing-name') as "sortname",
+        get_localized_text(res.nrflocalizeddescrs, '') as "sortdesc"
+        FROM viz_roles_resources AS vrr
+        JOIN viz_resources AS res ON vrr.nrfresource = res.dn
+        WHERE vrr.nrfrole = $1;
       `;
-            const parentHierarchyResult = await query(parentHierarchyQuery, [role.dn]);
-            return {
-                ...role,
-                parentHierarchy: parentHierarchyResult.rows,
-            };
+            const resourcesResult = await db.query(resourcesQuery, [child.dn]);
+            return { ...child, resources: resourcesResult.rows };
         }));
 
         res.json({
             data: {
-                resource_dn: dn,
-                roles: rolesWithHierarchy,
-            },
-            metadata: {}
+                parents: parentsResult.rows,
+                children: childrenWithResources,
+            }
         });
-    } catch (err: any) {
-        res.status(500).json({ error: err.message });
+    } catch (err) {
+        console.error('Fehler beim Abrufen der Rollen-Hierarchie:', err);
+        res.status(500).send('Fehler beim Abrufen der Rollen-Hierarchie.');
     }
 });
 
-// Server starten
-app.listen(port, async () => {
-    console.log(`Server läuft auf http://localhost:${port}`);
-    await checkTables();
+// Endpunkt zum Abrufen aller Rollen, die eine Ressource zuweisen
+app.get('/api/resources/:dn/roles', async (req, res) => {
+    const { dn } = req.params;
+
+    const query = `
+    SELECT
+      r.*,
+      get_localized_text(r.nrflocalizednames, 'missing-name') as "sortname"
+    FROM viz_roles_resources AS vrr
+    JOIN viz_roles AS r ON vrr.nrfrole = r.dn
+    WHERE vrr.nrfresource = $1
+    ORDER BY sortname ASC;
+  `;
+
+    try {
+        const result = await db.query(query, [dn]);
+        res.json({ data: result.rows });
+    } catch (err) {
+        console.error('Fehler beim Abrufen der Rollen für die Ressource:', err);
+        res.status(500).send('Fehler beim Abrufen der Rollen für die Ressource.');
+    }
 });

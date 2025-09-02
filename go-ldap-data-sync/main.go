@@ -1,3 +1,4 @@
+// Version: 1.0.10
 /**
  * Go-Programm zum Synchronisieren von LDAP-Daten mit einer PostgreSQL-Datenbank.
  *
@@ -25,6 +26,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -77,6 +79,7 @@ type config struct {
 	DBDatabase   string
 	DryRun       bool
 	PurgeAgeInDays int
+	LDAPTimeout    time.Duration
 }
 
 // initConfig liest die Konfiguration aus den Umgebungsvariablen.
@@ -102,6 +105,19 @@ func initConfig() config {
 	}
 	if cfg.DBDatabase == "" {
 		cfg.DBDatabase = "idm_rolemanagement_prod"
+	}
+
+	ldapTimeoutStr := os.Getenv("LDAP_TIMEOUT_SECONDS")
+	if ldapTimeoutStr == "" {
+		cfg.LDAPTimeout = 150 * time.Second // Standard-Timeout: 150 Sekunden
+	} else {
+		timeout, err := time.ParseDuration(ldapTimeoutStr + "s")
+		if err != nil {
+			log.Printf("Ungültiger Wert für LDAP_TIMEOUT_SECONDS, verwende Standardwert 150. Fehler: %v", err)
+			cfg.LDAPTimeout = 150 * time.Second
+		} else {
+			cfg.LDAPTimeout = timeout
+		}
 	}
 	
 	purgeAgeStr := os.Getenv("PURGE_AGE_IN_DAYS")
@@ -135,9 +151,12 @@ func main() {
 		}
 		log.Println("Starte den normalen Modus: Daten werden von LDAP gelesen und in die Datenbank geschrieben.")
 	}
-
+	
+	// Konfiguriere einen Dialer mit Timeout
+	dialer := &net.Dialer{Timeout: cfg.LDAPTimeout}
+	
 	// Verbinde zur LDAP-Datenbank über unverschlüsselte Verbindung
-	ldapConn, err := ldap.DialURL(fmt.Sprintf("ldap://%s:%s", cfg.LDAPHost, cfg.LDAPPort))
+	ldapConn, err := ldap.DialURL(fmt.Sprintf("ldap://%s:%s", cfg.LDAPHost, cfg.LDAPPort), ldap.DialWithDialer(dialer))
 	if err != nil {
 		log.Fatalf("Fehler beim Verbinden zu LDAP: %v", err)
 	}
@@ -270,8 +289,8 @@ func createTables(db *sql.DB) {
       CREATE TABLE IF NOT EXISTS viz_roles (
         dn TEXT PRIMARY KEY,
         nrfRoleLevel TEXT,
-        nrfLocalizedNames TEXT,
-        nrfLocalizedDescrs TEXT,
+        nrflocalizednames JSONB,
+        nrflocalizeddescrs JSONB,
         nrfRoleCategoryKey TEXT,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -283,10 +302,11 @@ func createTables(db *sql.DB) {
 	}
 
 	// Neue Junction-Tabelle für die Parent-Child-Beziehung
+	// Der Fremdschlüssel auf parent_dn wird entfernt, um den Fehler zu beheben.
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS viz_roles_parents (
 			child_dn TEXT REFERENCES viz_roles(dn) ON DELETE CASCADE,
-			parent_dn TEXT REFERENCES viz_roles(dn) ON DELETE CASCADE,
+			parent_dn TEXT,
 			PRIMARY KEY (child_dn, parent_dn)
 		);
 	`)
@@ -297,8 +317,8 @@ func createTables(db *sql.DB) {
 	_, err = db.Exec(`
       CREATE TABLE IF NOT EXISTS viz_resources (
         dn TEXT PRIMARY KEY,
-        nrfLocalizedNames TEXT,
-        nrfLocalizedDescrs TEXT,
+        nrflocalizednames JSONB,
+        nrflocalizeddescrs JSONB,
         nrfCategoryKey TEXT,
         nrfAllowMulti TEXT,
         entitlement_driver TEXT,
@@ -400,11 +420,11 @@ func syncRoles(conn *ldap.Conn, db *sql.DB, syncStartTimestamp time.Time) {
 	)
 	if err != nil {
 		log.Printf("Fehler beim Synchronisieren der Rollen: %v", err)
-        writeJSONToFile("roles_raw_data.json", entries)
+		writeJSONToFile("roles_raw_data.json", entries)
 		return
 	}
 	log.Printf("Gefundene Rollen: %d", len(entries))
-    writeJSONToFile("roles_raw_data.json", entries)
+	writeJSONToFile("roles_raw_data.json", entries)
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -416,13 +436,13 @@ func syncRoles(conn *ldap.Conn, db *sql.DB, syncStartTimestamp time.Time) {
 	// Phase 1: Rollen in die viz_roles-Tabelle einfügen
 	log.Println("Phase 1: Füge Rollen in die Tabelle viz_roles ein...")
 	roleStmt, err := tx.Prepare(
-		`INSERT INTO viz_roles (dn, nrfRoleLevel, nrfLocalizedNames, nrfLocalizedDescrs, nrfRoleCategoryKey, created_at, updated_at, is_deleted) 
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
-		 ON CONFLICT (dn) DO UPDATE SET 
-		 	nrfrolelevel = EXCLUDED.nrfrolelevel, 
-		 	nrflocalizednames = EXCLUDED.nrflocalizednames, 
-		 	nrflocalizeddescrs = EXCLUDED.nrflocalizeddescrs, 
-		 	nrfrolecategorykey = EXCLUDED.nrfrolecategorykey, 
+		`INSERT INTO viz_roles (dn, nrfRoleLevel, nrflocalizednames, nrflocalizeddescrs, nrfRoleCategoryKey, created_at, updated_at, is_deleted)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (dn) DO UPDATE SET
+			nrfrolelevel = EXCLUDED.nrfrolelevel,
+			nrflocalizednames = EXCLUDED.nrflocalizednames,
+			nrflocalizeddescrs = EXCLUDED.nrflocalizeddescrs,
+			nrfrolecategorykey = EXCLUDED.nrfrolecategorykey,
 			updated_at = $7,
 			is_deleted = FALSE`,
 	)
@@ -434,9 +454,9 @@ func syncRoles(conn *ldap.Conn, db *sql.DB, syncStartTimestamp time.Time) {
 
 	timestampStr := syncStartTimestamp.Format(time.RFC3339)
 
+	// Alle Rollen in der ersten Schleife einfügen
 	for _, entry := range entries {
 		var nrfRoleCategoryKey string
-		// Geändertes Attribut-Parsing zur Vermeidung von Index-Fehlern
 		nrfRoleLevel := entry.GetAttributeValue("nrfRoleLevel")
 		nrfLocalizedNames := entry.GetAttributeValue("nrfLocalizedNames")
 		nrfLocalizedDescrs := entry.GetAttributeValue("nrfLocalizedDescrs")
@@ -449,7 +469,7 @@ func syncRoles(conn *ldap.Conn, db *sql.DB, syncStartTimestamp time.Time) {
 		localizedNamesJSON, _ := json.Marshal(parseLocalizedAttributes(nrfLocalizedNames))
 		localizedDescrsJSON, _ := json.Marshal(parseLocalizedAttributes(nrfLocalizedDescrs))
 
-		_, err := roleStmt.Exec(entry.DN, nrfRoleLevel, string(localizedNamesJSON), string(localizedDescrsJSON), nrfRoleCategoryKey, timestampStr, timestampStr, false)
+		_, err := roleStmt.Exec(entry.DN, nrfRoleLevel, localizedNamesJSON, localizedDescrsJSON, nrfRoleCategoryKey, timestampStr, timestampStr, false)
 		if err != nil {
 			log.Printf("Fehler beim Einfügen der Rolle %s: %v", entry.DN, err)
 			tx.Rollback()
@@ -457,7 +477,7 @@ func syncRoles(conn *ldap.Conn, db *sql.DB, syncStartTimestamp time.Time) {
 		}
 	}
 	log.Println("Phase 1 abgeschlossen. Rollen erfolgreich eingefügt.")
-
+	
 	// Phase 2: Junction-Tabelle mit den Parent-Beziehungen füllen
 	log.Println("Phase 2: Füge Parent-Beziehungen in die Tabelle viz_roles_parents ein...")
 	_, err = tx.Exec(`DELETE FROM viz_roles_parents`)
@@ -483,7 +503,6 @@ func syncRoles(conn *ldap.Conn, db *sql.DB, syncStartTimestamp time.Time) {
 				_, err := parentStmt.Exec(entry.DN, parentDN)
 				if err != nil {
 					log.Printf("Fehler beim Einfügen der Parent-Beziehung für %s: %v", entry.DN, err)
-					// Bei einem Fehler hier wird die Transaktion abgebrochen. Wir loggen und rollen zurück.
 					tx.Rollback()
 					return
 				}
@@ -522,7 +541,7 @@ func syncResources(conn *ldap.Conn, db *sql.DB, syncStartTimestamp time.Time) {
 
 	stmt, err := tx.Prepare(
 		`INSERT INTO viz_resources (
-            dn, nrfLocalizedNames, nrfLocalizedDescrs, nrfCategoryKey, nrfAllowMulti, 
+            dn, nrflocalizednames, nrflocalizeddescrs, nrfCategoryKey, nrfAllowMulti, 
             entitlement_driver, entitlement_status, entitlement_xml, entitlement_xml_src, 
             entitlement_xml_id, entitlement_xml_param_id, entitlement_xml_param_id2, entitlement_xml_param_id3,
             created_at, updated_at, is_deleted
@@ -607,8 +626,8 @@ func syncResources(conn *ldap.Conn, db *sql.DB, syncStartTimestamp time.Time) {
 		
 		_, err = stmt.Exec(
 			entry.DN,
-			string(localizedNamesJSON),
-			string(localizedDescrsJSON),
+			localizedNamesJSON,
+			localizedDescrsJSON,
 			nrfCategoryKey,
 			nrfAllowMulti,
 			entitlementDriver,
@@ -675,7 +694,6 @@ func syncAssociations(conn *ldap.Conn, db *sql.DB, syncStartTimestamp time.Time)
 	)
 	if err != nil {
 		log.Printf("Fehler beim Vorbereiten des Statements für Assoziationen: %v", err)
-		tx.Rollback()
 		return
 	}
 	defer stmt.Close()
@@ -714,8 +732,6 @@ func syncAssociations(conn *ldap.Conn, db *sql.DB, syncStartTimestamp time.Time)
 		_, err := stmt.Exec(entry.DN, nrfRole, nrfResource, nrfDynamicParmVals, nrfdynamicparmvalsValueJSON, nrfStatus, createTimestamp, modifyTimestamp, timestampStr, timestampStr, false)
 		if err != nil {
 			log.Printf("Fehler beim Einfügen der Assoziation %s: %v", entry.DN, err)
-			tx.Rollback()
-			return
 		}
 	}
 	tx.Commit()
@@ -733,6 +749,9 @@ func parseLocalizedAttributes(localizedString string) map[string]string {
 		if strings.Contains(part, "~") {
 			split := strings.SplitN(part, "~", 2)
 			result[split[0]] = split[1]
+		} else if part != "" {
+			// Handle cases where the string does not contain a '~'
+			result["raw"] = part
 		}
 	}
 	return result
