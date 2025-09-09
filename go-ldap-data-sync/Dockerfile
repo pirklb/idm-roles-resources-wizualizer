@@ -1,8 +1,8 @@
-# Version: 1.0.3
+# Version: 1.0.4
 # Build-Stage
 # Wir verwenden das offizielle Go-Image, um den Quellcode zu kompilieren.
 # Dieses Image enthält alle Build-Tools, die wir benötigen.
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 # Setze das Arbeitsverzeichnis im Container
 WORKDIR /app
