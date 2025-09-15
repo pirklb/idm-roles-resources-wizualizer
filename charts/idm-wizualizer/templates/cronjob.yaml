@@ -1,0 +1,25 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "idm-wizualizer.fullname" . }}
+  labels:
+    {{- include "idm-wizualizer.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronjob.schedule | quote }}
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: go-ldap-datasync
+            image: "{{ .Values.cronjob.repository }}:{{ .Values.cronjob.tag }}"
+            imagePullPolicy: {{ .Values.cronjob.pullPolicy }}
+            env:
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.cronjob.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            restartPolicy: Never
+        

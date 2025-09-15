@@ -1,6 +1,7 @@
-// Version: 1.0.13
+// Version: 1.0.32
 import express from 'express';
 import { Pool, QueryResult } from 'pg';
+import path from 'path'; // Pfad-Modul für den Dateisystemzugriff
 import cors from 'cors';
 import * as dotenv from 'dotenv';
 
@@ -9,8 +10,14 @@ dotenv.config();
 const app = express();
 const port = 3000;
 
-app.use(cors());
 app.use(express.json());
+app.use(cors()); // CORS wieder aktiviert, um ursprungsübergreifende Anfragen zu ermöglichen
+
+// Setze den Pfad zu den statischen Frontend-Dateien
+const frontendDistPath = path.join(__dirname, '../frontend/dist');
+
+// Middleware, um statische Dateien auszuliefern
+app.use(express.static(frontendDistPath));
 
 // Datenbankkonfiguration aus Umgebungsvariablen
 const pool = new Pool({
@@ -251,6 +258,28 @@ app.get('/api/resources/:dn', async (req, res) => {
     }
 });
 
+// Neuer Endpunkt, um direkt zugeordnete Ressourcen für eine Rolle abzurufen
+app.get('/api/roles/:dn/resources', async (req, res) => {
+    const { dn } = req.params;
+    try {
+        const query = `
+      SELECT
+        res.*,
+        get_localized_text(res.nrflocalizednames, 'missing-name') as "sortname",
+        get_localized_text(res.nrflocalizeddescrs, '') as "sortdesc"
+      FROM viz_roles_resources AS vrr
+      JOIN viz_resources AS res ON vrr.nrfresource = res.dn
+      WHERE vrr.nrfrole = $1;
+    `;
+        const result = await db.query(query, [dn]);
+        res.json({ data: result.rows });
+    } catch (err) {
+        console.error('Fehler beim Abrufen der Ressourcen für die Rolle:', err);
+        res.status(500).send('Fehler beim Abrufen der Ressourcen für die Rolle.');
+    }
+});
+
+
 // Rekursiver Endpunkt zur Abfrage der gesamten Rollen-Hierarchie
 app.get('/api/roles/:dn/full-hierarchy', async (req, res) => {
     const { dn } = req.params;
@@ -341,4 +370,9 @@ app.get('/api/resources/:dn/roles', async (req, res) => {
         console.error('Fehler beim Abrufen der Rollen für die Ressource:', err);
         res.status(500).send('Fehler beim Abrufen der Rollen für die Ressource.');
     }
+});
+
+// Fallback-Route für das Frontend
+app.get('*', (req, res) => {
+    res.sendFile(path.join(frontendDistPath, 'index.html'));
 });

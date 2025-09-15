@@ -1,4 +1,4 @@
-// Version: 1.0.15
+// Version: 1.0.33
 import React, { useState, useEffect } from 'react';
 import { LuChevronFirst, LuChevronLeft, LuChevronRight, LuChevronLast } from 'react-icons/lu';
 
@@ -96,11 +96,18 @@ const App = () => {
         }
     };
 
+    const isDev = import.meta.env.VITE_STAGE === 'development';
+
     return (
         <div className="min-h-screen bg-gray-100 p-8 flex flex-col items-center">
-            <div className="w-full max-w-4xl bg-white rounded-lg shadow-lg p-6">
+            <div className="w-full max-w-4xl bg-white rounded-lg shadow-lg p-6 relative">
+                {isDev && (
+                    <div className="absolute top-0 right-0 bg-red-500 text-white text-xs font-bold px-2 py-1 rounded-bl-lg rounded-tr-lg">
+                        DEV
+                    </div>
+                )}
                 <h1 className="text-3xl font-bold text-center text-gray-800 mb-6">
-                    LDAP-Visualisierungs-App
+                    IDM Wizualizer
                 </h1>
                 {currentPage !== 'search' && (
                     <button
@@ -133,17 +140,28 @@ const SearchPage = ({ navigate }: { navigate: (page: string, dn: string) => void
     const [roleError, setRoleError] = useState<string | null>(null);
     const [resourceError, setResourceError] = useState<string | null>(null);
 
+    // Kapselung des Fetch-Aufrufs in einer Hilfsfunktion
+    const fetchData = async (url: string) => {
+        // Die Variable `VITE_STAGE` wird nur von Vite verarbeitet.
+        // In der Build-Phase ist sie nicht verfügbar.
+        const isDev = import.meta.env.VITE_STAGE === 'development';
+        const baseURL = isDev ? 'http://localhost:3000' : '';
+        const fullURL = `${baseURL}${url}`;
+
+        const response = await fetch(fullURL);
+        if (!response.ok) {
+            throw new Error(`Fehler beim Abrufen von ${url}`);
+        }
+        return response.json();
+    };
+
     useEffect(() => {
         const fetchRoles = async () => {
             if (roleSearchTerm.length < 2) return;
             setIsRoleLoading(true);
             setRoleError(null);
             try {
-                const response = await fetch(`http://localhost:3000/api/roles?search=${roleSearchTerm}&from=${roleFrom}&size=${roleSize}`);
-                if (!response.ok) {
-                    throw new Error('Fehler beim Abrufen der Rollen');
-                }
-                const data: SearchResponse<Role> = await response.json();
+                const data: SearchResponse<Role> = await fetchData(`/api/roles?search=${roleSearchTerm}&from=${roleFrom}&size=${roleSize}`);
                 setRoles(data.data);
                 setRoleMetadata(data.metadata);
             } catch (err: any) {
@@ -161,11 +179,7 @@ const SearchPage = ({ navigate }: { navigate: (page: string, dn: string) => void
             setIsResourceLoading(true);
             setResourceError(null);
             try {
-                const response = await fetch(`http://localhost:3000/api/resources?search=${resourceSearchTerm}&from=${resourceFrom}&size=${resourceSize}`);
-                if (!response.ok) {
-                    throw new Error('Fehler beim Abrufen der Resourcen');
-                }
-                const data: SearchResponse<Resource> = await response.json();
+                const data: SearchResponse<Resource> = await fetchData(`/api/resources?search=${resourceSearchTerm}&from=${resourceFrom}&size=${resourceSize}`);
                 setResources(data.data);
                 setResourceMetadata(data.metadata);
             } catch (err: any) {
@@ -308,6 +322,8 @@ const SearchPage = ({ navigate }: { navigate: (page: string, dn: string) => void
 const RoleDetailsPage = ({ dn, navigate }: { dn: string; navigate: (page: string, dn: string) => void }) => {
     const [role, setRole] = useState<any>(null);
     const [hierarchy, setHierarchy] = useState<{ parents: Role[], children: Role[] } | null>(null);
+    const [directResources, setDirectResources] = useState<Resource[] | null>(null);
+    const [activeTab, setActiveTab] = useState<'roles' | 'resources'>('roles');
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
@@ -326,6 +342,11 @@ const RoleDetailsPage = ({ dn, navigate }: { dn: string; navigate: (page: string
                 const hierarchyData = await hierarchyResponse.json();
                 setHierarchy(hierarchyData.data);
                 console.log('Abgerufene Hierarchiedaten:', hierarchyData.data);
+
+                const resourcesResponse = await fetch(`http://localhost:3000/api/roles/${encodeURIComponent(dn)}/resources`);
+                if (!resourcesResponse.ok) throw new Error('Fehler beim Abrufen der Ressourcen');
+                const resourcesData = await resourcesResponse.json();
+                setDirectResources(resourcesData.data);
 
             } catch (err: any) {
                 setError(err.message);
@@ -357,13 +378,11 @@ const RoleDetailsPage = ({ dn, navigate }: { dn: string; navigate: (page: string
     const renderRoleItem = (roleItem: Role) => {
         const mlClass = `ml-${roleItem.depth * 4}`;
         return (
-            <div className={`space-y-2 ${mlClass}`}>
-                <li key={roleItem.dn} className={`relative group`}>
-                    <div className="cursor-pointer text-blue-600 hover:underline" onClick={() => navigate('roleDetails', roleItem.dn)}>
-                        {getLocalizedText(roleItem.nrflocalizednames)}
-                    </div>
-                    {renderTooltip(getLocalizedText(roleItem.nrflocalizeddescrs, 'Keine Beschreibung'))}
-                </li>
+            <li key={roleItem.dn} className={`relative group ${mlClass}`}>
+                <div className="cursor-pointer text-blue-600 hover:underline" onClick={() => navigate('roleDetails', roleItem.dn)}>
+                    {getLocalizedText(roleItem.nrflocalizednames)}
+                </div>
+                {renderTooltip(getLocalizedText(roleItem.nrflocalizeddescrs, 'Keine Beschreibung'))}
                 {roleItem.resources && roleItem.resources.length > 0 && (
                     <ul className={`space-y-1 ml-4`}>
                         {roleItem.resources.map((resource: Resource) => (
@@ -373,37 +392,83 @@ const RoleDetailsPage = ({ dn, navigate }: { dn: string; navigate: (page: string
                         ))}
                     </ul>
                 )}
-            </div>
+            </li>
         );
     };
+
+    const renderResourceItem = (resourceItem: Resource) => {
+        return (
+            <li key={resourceItem.dn} className="italic text-gray-600 relative group ml-4">
+                {getLocalizedText(resourceItem.nrflocalizednames)}
+                {renderTooltip(getLocalizedText(resourceItem.nrflocalizeddescrs, 'Keine Beschreibung'))}
+            </li>
+        );
+    };
+
 
     return (
         <div className="p-6">
             <h2 className="text-2xl font-bold text-gray-700 mb-2">{getLocalizedText(role.nrflocalizednames)}</h2>
             <p className="text-sm text-gray-500 mb-4">{getLocalizedText(role.nrflocalizeddescrs, role.dn)}</p>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div>
-                    <h3 className="text-xl font-semibold text-gray-700 mb-2">Parent-Rollen</h3>
-                    {hierarchy && hierarchy.parents && hierarchy.parents.length > 0 ? (
-                        <ul className="space-y-2">
-                            {hierarchy.parents.map(renderRoleItem)}
-                        </ul>
-                    ) : (
-                        <p className="text-gray-500">Keine Parent-Rollen gefunden.</p>
-                    )}
-                </div>
-                <div>
-                    <h3 className="text-xl font-semibold text-gray-700 mb-2">Child-Rollen</h3>
-                    {hierarchy && hierarchy.children && hierarchy.children.length > 0 ? (
-                        <ul className="space-y-2">
-                            {hierarchy.children.map(renderRoleItem)}
-                        </ul>
-                    ) : (
-                        <p className="text-gray-500">Keine Child-Rollen gefunden.</p>
-                    )}
-                </div>
+            <div className="mb-4 border-b border-gray-200">
+                <nav className="-mb-px flex space-x-8" aria-label="Tabs">
+                    <button
+                        onClick={() => setActiveTab('roles')}
+                        className={`${activeTab === 'roles'
+                                ? 'border-blue-500 text-blue-600'
+                                : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700'
+                            } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors duration-200`}
+                    >
+                        Rollen
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('resources')}
+                        className={`${activeTab === 'resources'
+                                ? 'border-blue-500 text-blue-600'
+                                : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700'
+                            } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors duration-200`}
+                    >
+                        Ressourcen
+                    </button>
+                </nav>
             </div>
+
+            {activeTab === 'roles' ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div>
+                        <h3 className="text-xl font-semibold text-gray-700 mb-2">Parent-Rollen</h3>
+                        {hierarchy && hierarchy.parents && hierarchy.parents.length > 0 ? (
+                            <ul className="space-y-2">
+                                {hierarchy.parents.map((parentRole: Role) => renderRoleItem(parentRole))}
+                            </ul>
+                        ) : (
+                            <p className="text-gray-500">Keine Parent-Rollen gefunden.</p>
+                        )}
+                    </div>
+                    <div>
+                        <h3 className="text-xl font-semibold text-gray-700 mb-2">Child-Rollen</h3>
+                        {hierarchy && hierarchy.children && hierarchy.children.length > 0 ? (
+                            <ul className="space-y-2">
+                                {hierarchy.children.map((childRole: Role) => renderRoleItem(childRole))}
+                            </ul>
+                        ) : (
+                            <p className="text-gray-500">Keine Child-Rollen gefunden.</p>
+                        )}
+                    </div>
+                </div>
+            ) : (
+                <div>
+                    <h3 className="text-xl font-semibold text-gray-700 mb-2">Direkt zugewiesene Ressourcen</h3>
+                    {directResources && directResources.length > 0 ? (
+                        <ul className="space-y-2">
+                            {directResources.map(renderResourceItem)}
+                        </ul>
+                    ) : (
+                        <p className="text-gray-500">Keine Ressourcen gefunden.</p>
+                    )}
+                </div>
+            )}
         </div>
     );
 };
@@ -415,19 +480,28 @@ const ResourceDetailsPage = ({ dn, navigate }: { dn: string; navigate: (page: st
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
+    // Kapselung des Fetch-Aufrufs in einer Hilfsfunktion
+    const fetchData = async (url: string) => {
+        const stage = import.meta.env.VITE_STAGE;
+        const baseURL = stage === 'development' ? 'http://localhost:3000' : '';
+        const fullURL = `${baseURL}${url}`;
+
+        const response = await fetch(fullURL);
+        if (!response.ok) {
+            throw new Error(`Fehler beim Abrufen von ${url}`);
+        }
+        return response.json();
+    };
+
     useEffect(() => {
         const fetchResourceDetails = async () => {
             setIsLoading(true);
             setError(null);
             try {
-                const resourceResponse = await fetch(`http://localhost:3000/api/resources/${encodeURIComponent(dn)}`);
-                if (!resourceResponse.ok) throw new Error('Ressource nicht gefunden');
-                const resourceData = await resourceResponse.json();
+                const resourceData = await fetchData(`/api/resources/${encodeURIComponent(dn)}`);
                 setResource(resourceData);
 
-                const rolesResponse = await fetch(`http://localhost:3000/api/resources/${encodeURIComponent(dn)}/roles`);
-                if (!rolesResponse.ok) throw new Error('Fehler beim Abrufen der Rollen');
-                const rolesData = await rolesResponse.json();
+                const rolesData = await fetchData(`/api/resources/${encodeURIComponent(dn)}/roles`);
                 setRoles(rolesData.data);
             } catch (err: any) {
                 setError(err.message);
