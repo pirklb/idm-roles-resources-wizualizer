@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node dist/server.js",
     "dev": "nodemon --watch backend/server.ts --exec \"ts-node -r tsconfig-paths/register --files backend/server.ts\"",
-    "build": "npm run build --prefix frontend && tsc"
+    "build": "npm run build --prefix frontend && npm run build:backend",
+    "build:backend": "./node_modules/.bin/tsc"
   },
   "dependencies": {
     "cors": "^2.8.5",

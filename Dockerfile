@@ -1,53 +1,72 @@
-# Version: 1.0.1
-# Stufe 1: Frontend-Build
-# Wir verwenden ein Node.js-Image, das für den Frontend-Build optimiert ist.
+# Version: 1.0.10
+# Stage 1: Build Frontend
+# Nutze ein Node.js-Image als Basis für den Frontend-Build-Prozess.
 FROM node:20-alpine AS frontend-builder
-
 WORKDIR /app/frontend
 
-# Kopiere package.json und installiere die Frontend-Abhängigkeiten
+# Kopiere die Package-Definitionen, um Abhängigkeiten zu cachen.
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm install --frozen-lockfile
 
-# Kopiere den Frontend-Quellcode und führe den Build aus
-COPY frontend/ ./
+# Installiere die Frontend-Abhängigkeiten.
+RUN npm install
+
+# Kopiere die restlichen Frontend-Dateien, um den Build zu starten.
+# Beachte: index.html liegt jetzt direkt im "frontend"-Ordner.
+COPY frontend/tsconfig.json ./
+COPY frontend/vite.config.ts ./
+COPY frontend/src/ ./src/
+COPY frontend/index.html ./
+
+# Führe den Vite-Build-Prozess aus, um die statischen Dateien zu erstellen.
 RUN npm run build
 
 
-# Stufe 2: Backend-Build
-# Wir verwenden ein Node.js-Image, das für den Backend-Build optimiert ist.
+# Stage 2: Build Backend
+# Nutze ein Node.js-Image als Basis für den Backend-Build-Prozess.
 FROM node:20-alpine AS backend-builder
-
 WORKDIR /app
 
-# Kopiere package.json und installiere die Backend-Abhängigkeiten
+# Kopiere die Package-Definitionen für das Backend.
 COPY package.json package-lock.json ./
-RUN npm install --frozen-lockfile
 
-# Kopiere den Backend-Quellcode und führe den TypeScript-Build aus
-COPY backend/ ./backend/
+# Installiere die Backend-Abhängigkeiten.
+# Da 'tsc' eine devDependency ist, installieren wir alle Pakete.
+RUN npm install
+
+# Kopiere die TypeScript-Konfiguration und den Quellcode des Backends.
 COPY tsconfig.json ./
-RUN tsc
+COPY backend/ ./backend/
+
+# Füge das Build-Skript für das Backend hinzu
+RUN npm pkg set scripts.build:backend="tsc"
+
+# Kompiliere den TypeScript-Code zu JavaScript.
+RUN npm run build:backend
 
 
-# Stufe 3: Finales Image
-# Wir verwenden ein schlankes Node.js-Image für den finalen Container.
+# Final Stage
+# Erstelle das endgültige, schlanke Image für den Produktions-Server.
+# Es enthält nur die kompilierten Dateien und die notwendigen Abhängigkeiten.
 FROM node:20-alpine
 
-# Setze das Arbeitsverzeichnis
+# Setze das Arbeitsverzeichnis auf den Root des Servers.
 WORKDIR /app
 
-# Kopiere den Backend-Code und die Frontend-Build-Artefakte
+# Kopiere die Package-Definitionen für die Produktion.
+COPY --from=backend-builder /app/package.json ./
+COPY --from=backend-builder /app/package-lock.json ./
+
+# Kopiere die kompilierten Backend-Dateien aus der Backend-Build-Stage.
 COPY --from=backend-builder /app/dist ./dist
+
+# Kopiere das Frontend aus der Frontend-Build-Stage.
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
-COPY --from=backend-builder /app/node_modules ./node_modules
 
-# Füge die Startskripts und die .env-Datei hinzu
-COPY package.json .env ./
-RUN npm prune --production
+# Installiere nur die Produktions-Abhängigkeiten.
+RUN npm install --omit=dev
 
-# Definiere den Port, den der Container überwacht
+# Exponiere den Port, auf dem der Server lauscht.
 EXPOSE 3000
 
-# Führe den Startbefehl aus, wenn der Container gestartet wird
-CMD ["npm", "run", "start"]
+# Definiere den Befehl, der beim Starten des Containers ausgeführt wird.
+CMD ["node", "dist/server.js"]
